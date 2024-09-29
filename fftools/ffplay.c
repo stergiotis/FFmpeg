@@ -57,6 +57,7 @@
 #include "cmdutils.h"
 #include "ffplay_renderer.h"
 #include "opt_common.h"
+#include "../imzero/imzero.h"
 
 const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
@@ -198,6 +199,7 @@ typedef struct Decoder {
     SDL_Thread *decoder_tid;
 } Decoder;
 
+
 typedef struct VideoState {
     SDL_Thread *read_tid;
     const AVInputFormat *iformat;
@@ -299,6 +301,9 @@ typedef struct VideoState {
     int last_video_stream, last_audio_stream, last_subtitle_stream;
 
     SDL_cond *continue_read_thread;
+
+    int imzero_event_handler;
+    ImZeroState *imzero_state;
 } VideoState;
 
 /* options specified by the user */
@@ -351,6 +356,7 @@ static int filter_nbthreads = 0;
 static int enable_vulkan = 0;
 static char *vulkan_params = NULL;
 static const char *hwaccel = NULL;
+static const char *imzero_user_interaction_path;
 
 /* current context */
 static int is_full_screen;
@@ -1266,6 +1272,8 @@ static void stream_component_close(VideoState *is, int stream_index)
 
 static void stream_close(VideoState *is)
 {
+    imzero_destroy(is->imzero_state);
+
     /* XXX: use a special url_shutdown call to abort parse cleanly */
     is->abort_request = 1;
     SDL_WaitThread(is->read_tid, NULL);
@@ -3161,6 +3169,10 @@ static VideoState *stream_open(const char *filename,
     is->iformat = iformat;
     is->ytop    = 0;
     is->xleft   = 0;
+    is->imzero_event_handler = 1;
+    is->imzero_state = imzero_init(imzero_user_interaction_path);
+    if(!is->imzero_state)
+        return NULL;
 
     /* start video display */
     if (frame_queue_init(&is->pictq, &is->videoq, VIDEO_PICTURE_QUEUE_SIZE, 1) < 0)
@@ -3343,6 +3355,195 @@ static void seek_chapter(VideoState *is, int incr)
     stream_seek(is, av_rescale_q(is->ic->chapters[i]->start, is->ic->chapters[i]->time_base,
                                  AV_TIME_BASE_Q), 0, 0);
 }
+static inline void event_loop_handle_event_ffplay(VideoState *cur_stream,SDL_Event *event, double *incr, double *pos, double *frac) {
+    double x;
+    switch (event->type) {
+    case SDL_KEYDOWN:
+        if (exit_on_keydown || event->key.keysym.sym == SDLK_ESCAPE || event->key.keysym.sym == SDLK_q) {
+            do_exit(cur_stream);
+            break;
+        }
+        // If we don't yet have a window, skip all key events, because read_thread might still be initializing...
+        if (!cur_stream->width)
+            return;
+        switch (event->key.keysym.sym) {
+        case SDLK_f:
+            toggle_full_screen(cur_stream);
+            cur_stream->force_refresh = 1;
+            break;
+        case SDLK_p:
+        case SDLK_SPACE:
+            toggle_pause(cur_stream);
+            break;
+        case SDLK_m:
+            toggle_mute(cur_stream);
+            break;
+        case SDLK_KP_MULTIPLY:
+        case SDLK_0:
+            update_volume(cur_stream, 1, SDL_VOLUME_STEP);
+            break;
+        case SDLK_KP_DIVIDE:
+        case SDLK_9:
+            update_volume(cur_stream, -1, SDL_VOLUME_STEP);
+            break;
+        case SDLK_s: // S: Step to next frame
+            step_to_next_frame(cur_stream);
+            break;
+        case SDLK_a:
+            stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
+            break;
+        case SDLK_v:
+            stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
+            break;
+        case SDLK_c:
+            stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
+            stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
+            stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
+            break;
+        case SDLK_t:
+            stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
+            break;
+        case SDLK_w:
+            if (cur_stream->show_mode == SHOW_MODE_VIDEO && cur_stream->vfilter_idx < nb_vfilters - 1) {
+                if (++cur_stream->vfilter_idx >= nb_vfilters)
+                    cur_stream->vfilter_idx = 0;
+            } else {
+                cur_stream->vfilter_idx = 0;
+                toggle_audio_display(cur_stream);
+            }
+            break;
+        case SDLK_PAGEUP:
+            if (cur_stream->ic->nb_chapters <= 1) {
+                *incr = 600.0;
+                goto do_seek;
+            }
+            seek_chapter(cur_stream, 1);
+            break;
+        case SDLK_PAGEDOWN:
+            if (cur_stream->ic->nb_chapters <= 1) {
+                *incr = -600.0;
+                goto do_seek;
+            }
+            seek_chapter(cur_stream, -1);
+            break;
+        case SDLK_LEFT:
+            *incr = seek_interval ? -seek_interval : -10.0;
+            goto do_seek;
+        case SDLK_RIGHT:
+            *incr = seek_interval ? seek_interval : 10.0;
+            goto do_seek;
+        case SDLK_UP:
+            *incr = 60.0;
+            goto do_seek;
+        case SDLK_DOWN:
+            *incr = -60.0;
+        do_seek:
+                if (seek_by_bytes) {
+                    *pos = -1;
+                    if (*pos < 0 && cur_stream->video_stream >= 0)
+                        *pos = frame_queue_last_pos(&cur_stream->pictq);
+                    if (*pos < 0 && cur_stream->audio_stream >= 0)
+                        *pos = frame_queue_last_pos(&cur_stream->sampq);
+                    if (*pos < 0)
+                        *pos = avio_tell(cur_stream->ic->pb);
+                    if (cur_stream->ic->bit_rate)
+                        *incr *= cur_stream->ic->bit_rate / 8.0;
+                    else
+                        *incr *= 180000.0;
+                    *pos += *incr;
+                    stream_seek(cur_stream, *pos, *incr, 1);
+                } else {
+                    *pos = get_master_clock(cur_stream);
+                    if (isnan(*pos))
+                        *pos = (double)cur_stream->seek_pos / AV_TIME_BASE;
+                    *pos += *incr;
+                    if (cur_stream->ic->start_time != AV_NOPTS_VALUE && *pos < cur_stream->ic->start_time / (double)AV_TIME_BASE)
+                        *pos = cur_stream->ic->start_time / (double)AV_TIME_BASE;
+                    stream_seek(cur_stream, (int64_t)(*pos * AV_TIME_BASE), (int64_t)(*incr * AV_TIME_BASE), 0);
+                }
+            break;
+        default:
+            break;
+        }
+        break;
+    case SDL_MOUSEBUTTONDOWN:
+        if (exit_on_mousedown) {
+            do_exit(cur_stream);
+            break;
+        }
+        if (event->button.button == SDL_BUTTON_LEFT) {
+            static int64_t last_mouse_left_click = 0;
+            if (av_gettime_relative() - last_mouse_left_click <= 500000) {
+                toggle_full_screen(cur_stream);
+                cur_stream->force_refresh = 1;
+                last_mouse_left_click = 0;
+            } else {
+                last_mouse_left_click = av_gettime_relative();
+            }
+        }
+    case SDL_MOUSEMOTION:
+        if (cursor_hidden) {
+            SDL_ShowCursor(1);
+            cursor_hidden = 0;
+        }
+        cursor_last_shown = av_gettime_relative();
+        if (event->type == SDL_MOUSEBUTTONDOWN) {
+            if (event->button.button != SDL_BUTTON_RIGHT)
+                break;
+            x = event->button.x;
+        } else {
+            if (!(event->motion.state & SDL_BUTTON_RMASK))
+                break;
+            x = event->motion.x;
+        }
+            if (seek_by_bytes || cur_stream->ic->duration <= 0) {
+                uint64_t size =  avio_size(cur_stream->ic->pb);
+                stream_seek(cur_stream, size*x/cur_stream->width, 0, 1);
+            } else {
+                int64_t ts;
+                int ns, hh, mm, ss;
+                int tns, thh, tmm, tss;
+                tns  = cur_stream->ic->duration / 1000000LL;
+                thh  = tns / 3600;
+                tmm  = (tns % 3600) / 60;
+                tss  = (tns % 60);
+                *frac = x / cur_stream->width;
+                ns   = *frac * tns;
+                hh   = ns / 3600;
+                mm   = (ns % 3600) / 60;
+                ss   = (ns % 60);
+                av_log(NULL, AV_LOG_INFO,
+                        "Seek to %2.0f%% (%2d:%02d:%02d) of total duration (%2d:%02d:%02d)       \n", *frac*100,
+                        hh, mm, ss, thh, tmm, tss);
+                ts = *frac * cur_stream->ic->duration;
+                if (cur_stream->ic->start_time != AV_NOPTS_VALUE)
+                    ts += cur_stream->ic->start_time;
+                stream_seek(cur_stream, ts, 0, 0);
+            }
+        break;
+    case SDL_WINDOWEVENT:
+        switch (event->window.event) {
+            case SDL_WINDOWEVENT_SIZE_CHANGED:
+                screen_width  = cur_stream->width  = event->window.data1;
+                screen_height = cur_stream->height = event->window.data2;
+                if (cur_stream->vis_texture) {
+                    SDL_DestroyTexture(cur_stream->vis_texture);
+                    cur_stream->vis_texture = NULL;
+                }
+                if (vk_renderer)
+                    vk_renderer_resize(vk_renderer, screen_width, screen_height);
+            case SDL_WINDOWEVENT_EXPOSED:
+                cur_stream->force_refresh = 1;
+        }
+        break;
+    case SDL_QUIT:
+    case FF_QUIT_EVENT:
+        do_exit(cur_stream);
+        break;
+    default:
+        break;
+    }
+}
 
 /* handle an event sent by the GUI */
 static void event_loop(VideoState *cur_stream)
@@ -3351,193 +3552,11 @@ static void event_loop(VideoState *cur_stream)
     double incr, pos, frac;
 
     for (;;) {
-        double x;
         refresh_loop_wait_event(cur_stream, &event);
-        switch (event.type) {
-        case SDL_KEYDOWN:
-            if (exit_on_keydown || event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_q) {
-                do_exit(cur_stream);
-                break;
-            }
-            // If we don't yet have a window, skip all key events, because read_thread might still be initializing...
-            if (!cur_stream->width)
-                continue;
-            switch (event.key.keysym.sym) {
-            case SDLK_f:
-                toggle_full_screen(cur_stream);
-                cur_stream->force_refresh = 1;
-                break;
-            case SDLK_p:
-            case SDLK_SPACE:
-                toggle_pause(cur_stream);
-                break;
-            case SDLK_m:
-                toggle_mute(cur_stream);
-                break;
-            case SDLK_KP_MULTIPLY:
-            case SDLK_0:
-                update_volume(cur_stream, 1, SDL_VOLUME_STEP);
-                break;
-            case SDLK_KP_DIVIDE:
-            case SDLK_9:
-                update_volume(cur_stream, -1, SDL_VOLUME_STEP);
-                break;
-            case SDLK_s: // S: Step to next frame
-                step_to_next_frame(cur_stream);
-                break;
-            case SDLK_a:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
-                break;
-            case SDLK_v:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
-                break;
-            case SDLK_c:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_VIDEO);
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_AUDIO);
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
-                break;
-            case SDLK_t:
-                stream_cycle_channel(cur_stream, AVMEDIA_TYPE_SUBTITLE);
-                break;
-            case SDLK_w:
-                if (cur_stream->show_mode == SHOW_MODE_VIDEO && cur_stream->vfilter_idx < nb_vfilters - 1) {
-                    if (++cur_stream->vfilter_idx >= nb_vfilters)
-                        cur_stream->vfilter_idx = 0;
-                } else {
-                    cur_stream->vfilter_idx = 0;
-                    toggle_audio_display(cur_stream);
-                }
-                break;
-            case SDLK_PAGEUP:
-                if (cur_stream->ic->nb_chapters <= 1) {
-                    incr = 600.0;
-                    goto do_seek;
-                }
-                seek_chapter(cur_stream, 1);
-                break;
-            case SDLK_PAGEDOWN:
-                if (cur_stream->ic->nb_chapters <= 1) {
-                    incr = -600.0;
-                    goto do_seek;
-                }
-                seek_chapter(cur_stream, -1);
-                break;
-            case SDLK_LEFT:
-                incr = seek_interval ? -seek_interval : -10.0;
-                goto do_seek;
-            case SDLK_RIGHT:
-                incr = seek_interval ? seek_interval : 10.0;
-                goto do_seek;
-            case SDLK_UP:
-                incr = 60.0;
-                goto do_seek;
-            case SDLK_DOWN:
-                incr = -60.0;
-            do_seek:
-                    if (seek_by_bytes) {
-                        pos = -1;
-                        if (pos < 0 && cur_stream->video_stream >= 0)
-                            pos = frame_queue_last_pos(&cur_stream->pictq);
-                        if (pos < 0 && cur_stream->audio_stream >= 0)
-                            pos = frame_queue_last_pos(&cur_stream->sampq);
-                        if (pos < 0)
-                            pos = avio_tell(cur_stream->ic->pb);
-                        if (cur_stream->ic->bit_rate)
-                            incr *= cur_stream->ic->bit_rate / 8.0;
-                        else
-                            incr *= 180000.0;
-                        pos += incr;
-                        stream_seek(cur_stream, pos, incr, 1);
-                    } else {
-                        pos = get_master_clock(cur_stream);
-                        if (isnan(pos))
-                            pos = (double)cur_stream->seek_pos / AV_TIME_BASE;
-                        pos += incr;
-                        if (cur_stream->ic->start_time != AV_NOPTS_VALUE && pos < cur_stream->ic->start_time / (double)AV_TIME_BASE)
-                            pos = cur_stream->ic->start_time / (double)AV_TIME_BASE;
-                        stream_seek(cur_stream, (int64_t)(pos * AV_TIME_BASE), (int64_t)(incr * AV_TIME_BASE), 0);
-                    }
-                break;
-            default:
-                break;
-            }
-            break;
-        case SDL_MOUSEBUTTONDOWN:
-            if (exit_on_mousedown) {
-                do_exit(cur_stream);
-                break;
-            }
-            if (event.button.button == SDL_BUTTON_LEFT) {
-                static int64_t last_mouse_left_click = 0;
-                if (av_gettime_relative() - last_mouse_left_click <= 500000) {
-                    toggle_full_screen(cur_stream);
-                    cur_stream->force_refresh = 1;
-                    last_mouse_left_click = 0;
-                } else {
-                    last_mouse_left_click = av_gettime_relative();
-                }
-            }
-        case SDL_MOUSEMOTION:
-            if (cursor_hidden) {
-                SDL_ShowCursor(1);
-                cursor_hidden = 0;
-            }
-            cursor_last_shown = av_gettime_relative();
-            if (event.type == SDL_MOUSEBUTTONDOWN) {
-                if (event.button.button != SDL_BUTTON_RIGHT)
-                    break;
-                x = event.button.x;
-            } else {
-                if (!(event.motion.state & SDL_BUTTON_RMASK))
-                    break;
-                x = event.motion.x;
-            }
-                if (seek_by_bytes || cur_stream->ic->duration <= 0) {
-                    uint64_t size =  avio_size(cur_stream->ic->pb);
-                    stream_seek(cur_stream, size*x/cur_stream->width, 0, 1);
-                } else {
-                    int64_t ts;
-                    int ns, hh, mm, ss;
-                    int tns, thh, tmm, tss;
-                    tns  = cur_stream->ic->duration / 1000000LL;
-                    thh  = tns / 3600;
-                    tmm  = (tns % 3600) / 60;
-                    tss  = (tns % 60);
-                    frac = x / cur_stream->width;
-                    ns   = frac * tns;
-                    hh   = ns / 3600;
-                    mm   = (ns % 3600) / 60;
-                    ss   = (ns % 60);
-                    av_log(NULL, AV_LOG_INFO,
-                           "Seek to %2.0f%% (%2d:%02d:%02d) of total duration (%2d:%02d:%02d)       \n", frac*100,
-                            hh, mm, ss, thh, tmm, tss);
-                    ts = frac * cur_stream->ic->duration;
-                    if (cur_stream->ic->start_time != AV_NOPTS_VALUE)
-                        ts += cur_stream->ic->start_time;
-                    stream_seek(cur_stream, ts, 0, 0);
-                }
-            break;
-        case SDL_WINDOWEVENT:
-            switch (event.window.event) {
-                case SDL_WINDOWEVENT_SIZE_CHANGED:
-                    screen_width  = cur_stream->width  = event.window.data1;
-                    screen_height = cur_stream->height = event.window.data2;
-                    if (cur_stream->vis_texture) {
-                        SDL_DestroyTexture(cur_stream->vis_texture);
-                        cur_stream->vis_texture = NULL;
-                    }
-                    if (vk_renderer)
-                        vk_renderer_resize(vk_renderer, screen_width, screen_height);
-                case SDL_WINDOWEVENT_EXPOSED:
-                    cur_stream->force_refresh = 1;
-            }
-            break;
-        case SDL_QUIT:
-        case FF_QUIT_EVENT:
-            do_exit(cur_stream);
-            break;
-        default:
-            break;
+        if(cur_stream->imzero_event_handler) {
+            event_loop_handle_event_imzero(cur_stream, &event, &incr, &pos, &frac);
+        } else {
+            event_loop_handle_event_ffplay(cur_stream, &event, &incr, &pos, &frac);
         }
     }
 }
@@ -3702,6 +3721,7 @@ static const OptionDef options[] = {
     { "enable_vulkan",      OPT_TYPE_BOOL,            0, { &enable_vulkan }, "enable vulkan renderer" },
     { "vulkan_params",      OPT_TYPE_STRING, OPT_EXPERT, { &vulkan_params }, "vulkan configuration using a list of key=value pairs separated by ':'" },
     { "hwaccel",            OPT_TYPE_STRING, OPT_EXPERT, { &hwaccel }, "use HW accelerated decoding" },
+    { "imzero_user_interaction_path",            OPT_TYPE_STRING, 0, { &imzero_user_interaction_path }, "path to write imzero user interaction events (flatbuffer json) to" },
     { NULL, },
 };
 
@@ -3883,3 +3903,4 @@ int main(int argc, char **argv)
 
     return 0;
 }
+#include "../imzero/imzero.c"
