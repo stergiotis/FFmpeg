@@ -3312,7 +3312,7 @@ static void toggle_audio_display(VideoState *is)
     }
 }
 
-static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
+static void refresh_loop_wait_event_ffplay(VideoState *is, SDL_Event *event) {
     double remaining_time = 0.0;
     SDL_PumpEvents();
     while (!SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT)) {
@@ -3552,10 +3552,11 @@ static void event_loop(VideoState *cur_stream)
     double incr, pos, frac;
 
     for (;;) {
-        refresh_loop_wait_event(cur_stream, &event);
         if(cur_stream->imzero_event_handler) {
+            refresh_loop_wait_event_imzero(cur_stream, &event);
             event_loop_handle_event_imzero(cur_stream, &event, &incr, &pos, &frac);
         } else {
+            refresh_loop_wait_event_ffplay(cur_stream, &event);
             event_loop_handle_event_ffplay(cur_stream, &event, &incr, &pos, &frac);
         }
     }

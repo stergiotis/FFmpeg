@@ -20,22 +20,23 @@
 
 static FILE *fd;
 
-static void json_flush(void) {
+#if 0
+static void marshall_flush(void) {
     fputc('\n',fd);
     fflush(fd);
 }
 // Credits: adapted from ffprobe.c Copyright (c) 2007-2010 Stefano Sabatini
 // FIXME follow flatbuffers spec (e.g. use \x escaping)
-static void json_escape_str(FILE *fd, const char *str, size_t len) {
-    static const char json_escape[] = {'"', '\\', '\b', '\f', '\n', '\r', '\t', 0};
-    static const char json_subst[]  = {'"', '\\',  'b',  'f',  'n',  'r',  't', 0};
+static void marshall_escape_str(FILE *fd, const char *str, size_t len) {
+    static const char marshall_escape[] = {'"', '\\', '\b', '\f', '\n', '\r', '\t', 0};
+    static const char marshall_subst[]  = {'"', '\\',  'b',  'f',  'n',  'r',  't', 0};
 
     for(size_t i=0;i<len;i++) {
         const char p = str[i];
-        char *s = strchr(json_escape, p);
+        char *s = strchr(marshall_escape, p);
         if(s){
             fputc('\\',fd);
-            fputc(json_subst[s - json_escape], fd);
+            fputc(marshall_subst[s - json_escape], fd);
         } else if ((unsigned char)p < 32) {
             fprintf(fd,"\\u00%02x", ((unsigned char)p) & 0xff);
         } else {
@@ -44,46 +45,147 @@ static void json_escape_str(FILE *fd, const char *str, size_t len) {
     }
 }
 #define FLOAT_DIRECTIVE "%.9g"
-static void json_single_vec2(float x,float y) {
+static void marshall_single_vec2(float x,float y) {
     fprintf(fd,"{\"x\":"FLOAT_DIRECTIVE",\"y\":"FLOAT_DIRECTIVE"}",x,y);
 }
-static void json_event_mouse_motion(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch) {
+static void marshall_event_mouse_motion(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch) {
     fprintf(fd,"{\"event_type\":\"EventMouseMotion\",\"event\":{\"pos\":");
-    json_single_vec2(pos_x,pos_y);
+    marshall_single_vec2(pos_x,pos_y);
     fprintf(fd,",\"mouse_id\":%"PRIx32",\"is_touch\":%s}}",mouse_id,is_touch ? "true" : "false");
 }
-static void json_event_mouse_button(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch,uint8_t buttons,bool down) {
-    fprintf(fd,"{\"event_type\":\"EventMouseMotion\",\"event\":{\"pos\":");
-    json_single_vec2(pos_x,pos_y);
+static void marshall_event_mouse_button(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch,uint8_t buttons,bool down) {
+    fprintf(fd,"{\"event_type\":\"EventMouseButton\",\"event\":{\"pos\":");
+    marshall_single_vec2(pos_x,pos_y);
     fprintf(fd,",\"mouse_id\":%"PRIx32",\"is_touch\":%s,\"buttons\":%"PRId8",\"type\":%d}}",mouse_id,is_touch ? "true" : "false",buttons,down ? 1 : 0);
 }
-static void json_event_mouse_wheel(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch,uint8_t buttons) {
+static void marshall_event_mouse_wheel(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch,uint8_t buttons) {
     fprintf(fd,"{\"event_type\":\"EventMouseWheel\",\"event\":{\"pos\":");
-    json_single_vec2(pos_x,pos_y);
+    marshall_single_vec2(pos_x,pos_y);
     fprintf(fd,",\"mouse_id\":%"PRIx32",\"is_touch\":%s,\"buttons\":0x%"PRIx8"}}",mouse_id,is_touch ? "true" : "false",buttons);
 }
-static void json_event_client_connect(const char *desc,size_t desc_len) {
+static void marshall_event_client_connect(const char *desc,size_t desc_len) {
     static const char *p = "{\"event_type\":\"EventClientConnect\",\"event\":{\"desc\":\"";
     fwrite(p,1,strlen(p),fd);
-    json_escape_str(fd,desc,desc_len);
+    marshall_escape_str(fd,desc,desc_len);
     fwrite("\"}}",1,3,fd);
 }
-static void json_event_client_disconnect(const char *desc, size_t desc_len) {
+static void marshall_event_client_disconnect(const char *desc, size_t desc_len) {
     static const char *p = "{\"event_type\":\"EventClientDisconnect\",\"event\":{\"desc\":\"";
     fwrite(p,1,strlen(p),fd);
-    json_escape_str(fd,desc,desc_len);
+    marshall_escape_str(fd,desc,desc_len);
     fwrite("\"}}",1,3,fd);
 }
-static void json_event_input_text(const char *text, size_t text_len) {
+static void marshall_event_input_text(const char *text, size_t text_len) {
     static const char *p = "{\"event_type\":\"EventInputText\",\"event\":{\"text\":\"";
     fwrite(p,1,strlen(p),fd);
-    json_escape_str(fd,text,text_len);
+    marshall_escape_str(fd,text,text_len);
     fwrite("\"}}",1,3,fd);
 }
-static void json_event_keyboard(uint16_t modifiers,const char *code,bool is_down,uint32_t native_sym,uint32_t scancode) {
+static void marshall_event_keyboard(uint16_t modifiers,const char *codename,bool is_down,uint32_t native_sym,uint32_t scancode) {
     fprintf(fd,"{\"event_type\":\"EventKeyboard\",\"event\":{\"modifiers\":0x%"PRIx16",\"code\":%s,\"is_down\":%s,\"native_sym\":0x%"PRIx32",\"scancode\":0x%"PRIx32"}}",
-               modifiers,code,is_down ? "true" : "false",native_sym,scancode);
+               modifiers,codename,is_down ? "true" : "false",native_sym,scancode);
 }
+static void marshall_event_keep_alive(void) {
+    fprintf(fd,"{\"event_type\":\"EventKeepAlive\"}}");
+}
+#else
+static inline void send_uint8(uint8_t v) {
+    fwrite(&v,sizeof(v),1,fd);
+}
+static inline void send_bool(bool v) {
+    send_uint8((uint8_t)v);
+}
+static inline void send_uint16(uint16_t v) {
+    fwrite(&v,sizeof(v),1,fd);
+}
+static inline void send_uint32(uint32_t v) {
+    fwrite(&v,sizeof(v),1,fd);
+}
+static inline void send_uint64(uint64_t v) {
+    fwrite(&v,sizeof(v),1,fd);
+}
+static inline void send_float(float v) {
+    fwrite(&v,sizeof(v),1,fd);
+}
+static inline void send_string(const char *buf,size_t len) {
+    send_uint32((uint32_t)len);
+    if(len > 0) {
+        fwrite(buf,1,len,fd);
+    }
+    send_uint8(0); // zero-terminate strings
+}
+const uint8_t eventType_MouseMotion = 0;
+const uint8_t eventType_MouseButton = 1;
+const uint8_t eventType_MouseWheel = 2;
+const uint8_t eventType_ClientConnect = 3;
+const uint8_t eventType_ClientDisconnect = 4;
+const uint8_t eventType_InputText = 5;
+const uint8_t eventType_InputKeyboard = 6;
+const uint8_t eventType_KeepAlive = 7;
+
+static void marshall_flush(void) {
+    fflush(fd);
+}
+static void marshall_single_vec2(float x,float y) {
+    send_float(x);
+    send_float(y);
+}
+static void marshall_event_mouse_motion(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch) {
+    send_uint32(sizeof(uint8_t)+2*sizeof(float)+sizeof(uint32_t)+sizeof(uint8_t));
+    send_uint8(eventType_MouseMotion);
+    marshall_single_vec2(pos_x,pos_y);
+    send_uint32(mouse_id);
+    send_bool(is_touch);
+}
+static void marshall_event_mouse_button(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch,uint8_t buttons,bool down) {
+    send_uint32(sizeof(uint8_t)+2*sizeof(float)+sizeof(uint32_t)+3*sizeof(uint8_t));
+    send_uint8(eventType_MouseButton);
+    marshall_single_vec2(pos_x,pos_y);
+    send_uint32(mouse_id);
+    send_bool(is_touch);
+    send_uint8(buttons);
+    send_bool(down);
+}
+static void marshall_event_mouse_wheel(float pos_x,float pos_y,uint32_t mouse_id,bool is_touch,uint8_t buttons) {
+    send_uint32(sizeof(uint8_t)+2*sizeof(float)+sizeof(uint32_t)+2*sizeof(uint8_t));
+    send_uint8(eventType_MouseWheel);
+    marshall_single_vec2(pos_x,pos_y);
+    send_uint32(mouse_id);
+    send_bool(is_touch);
+    send_uint8(buttons);
+}
+static uint32_t marshalled_length_string(size_t len) {
+    return sizeof(uint32_t)+len+1;
+}
+static void marshall_event_client_connect(const char *desc,size_t desc_len) {
+    send_uint32(sizeof(uint8_t)+marshalled_length_string(desc_len));
+    send_uint8(eventType_ClientConnect);
+    send_string(desc,desc_len);
+}
+static void marshall_event_client_disconnect(const char *desc, size_t desc_len) {
+    send_uint32(sizeof(uint8_t)+marshalled_length_string(desc_len));
+    send_uint8(eventType_ClientDisconnect);
+    send_string(desc,desc_len);
+}
+static void marshall_event_input_text(const char *text, size_t text_len) {
+    send_uint32(sizeof(uint8_t)+marshalled_length_string(text_len));
+    send_uint8(eventType_InputText);
+    send_string(text,text_len);
+}
+static void marshall_event_keyboard(uint16_t modifiers,const char *codename,bool is_down,uint32_t native_sym,uint32_t scancode) {
+    send_uint32(sizeof(uint8_t)+sizeof(uint16_t)+marshalled_length_string(0)+sizeof(uint8_t)+2*sizeof(uint32_t));
+    send_uint8(eventType_InputKeyboard);
+    send_uint16(modifiers);
+    send_string(NULL,0); // do not send codename as string
+    send_bool(is_down);
+    send_uint32(native_sym);
+    send_uint32(scancode);
+}
+static void marshall_event_keep_alive(void) {
+    send_uint32(sizeof(uint8_t));
+    send_uint8(eventType_KeepAlive);
+}
+#endif
 static uint8_t translate_mouse_buttons(uint8_t button) {
     #if 1
         static_assert(SDL_BUTTON_LEFT == 1);
@@ -108,20 +210,20 @@ static uint8_t translate_mouse_buttons(uint8_t button) {
     #endif
 }
 static void emit_sdl_mouse_motion(SDL_MouseMotionEvent *ev) {
-    json_event_mouse_motion(ev->x,ev->y,ev->which,ev->which == SDL_TOUCH_MOUSEID);
-    json_flush();
+    marshall_event_mouse_motion(ev->x,ev->y,ev->which,ev->which == SDL_TOUCH_MOUSEID);
+    marshall_flush();
 }
 static void emit_sdl_mouse_wheel(SDL_MouseWheelEvent *ev) {
-    json_event_mouse_wheel(ev->x,ev->y,ev->which,ev->which == SDL_TOUCH_MOUSEID,0);
-    json_flush();
+    marshall_event_mouse_wheel(ev->x,ev->y,ev->which,ev->which == SDL_TOUCH_MOUSEID,0);
+    marshall_flush();
 }
 static void emit_sdl_mouse_button(SDL_MouseButtonEvent *ev,bool down) {
-    json_event_mouse_button(ev->x,ev->y,ev->which,ev->which == SDL_TOUCH_MOUSEID,translate_mouse_buttons(ev->button),down);
-    json_flush();
+    marshall_event_mouse_button(ev->x,ev->y,ev->which,ev->which == SDL_TOUCH_MOUSEID,translate_mouse_buttons(ev->button),down);
+    marshall_flush();
 }
 static void emit_sdl_input_text(SDL_TextInputEvent *ev) {
-    json_event_input_text(ev->text,strlen(ev->text));
-    json_flush();    
+    marshall_event_input_text(ev->text,strlen(ev->text));
+    marshall_flush();    
 }
 
 //  Key_Apostrophe,
@@ -396,14 +498,14 @@ static uint16_t translate_sdl_keymod_to_imzero(SDL_Keymod key_mod) {
     return p;
 }
 static void emit_sdl_input_keyboard(SDL_KeyboardEvent *ev) {
-    json_event_keyboard(
+    marshall_event_keyboard(
         translate_sdl_keymod_to_imzero(ev->keysym.mod),
         translate_sdl_keysym_to_imzero(ev->keysym.sym),
         ev->type == SDL_KEYDOWN,
         (uint32_t)ev->keysym.sym,
         (uint32_t)ev->keysym.scancode
         );
-    json_flush();
+    marshall_flush();
 }
 
 static ImZeroState* imzero_init(const char *user_interaction_path) {
@@ -423,8 +525,8 @@ static ImZeroState* imzero_init(const char *user_interaction_path) {
         fd = NULL;
     }
     if(fd != NULL) {
-        json_event_client_connect("ffplay FIXME",12);
-        json_flush();
+        marshall_event_client_connect("ffplay FIXME",12);
+        marshall_flush();
     }
 
     return state;
@@ -433,10 +535,22 @@ static void imzero_reset(ImZeroState *state) {
 }
 static void imzero_destroy(ImZeroState *state) {
     if(fd != NULL) {
-        json_event_client_disconnect("ffplay FIXME",12);
-        json_flush();
+        marshall_event_client_disconnect("ffplay FIXME",12);
+        marshall_flush();
         fclose(fd);
         fd = NULL;
+    }
+}
+void refresh_loop_wait_event_imzero(struct VideoState *is, SDL_Event *event) {
+    double remaining_time = 0.0;
+    SDL_PumpEvents();
+    while (!SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT)) {
+        if (remaining_time > 0.0)
+            av_usleep((int64_t)(remaining_time * 1000000.0));
+        remaining_time = REFRESH_RATE;
+        if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh))
+            video_refresh(is, &remaining_time);
+        SDL_PumpEvents();
     }
 }
 

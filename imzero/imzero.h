@@ -11,6 +11,7 @@ typedef struct ImZeroState {
 
 struct VideoState;
 static inline void event_loop_handle_event_imzero(struct VideoState *cur_stream,SDL_Event *event, double *incr, double *pos, double *frac);
+static void refresh_loop_wait_event_imzero(struct VideoState *is, SDL_Event *event);
 static ImZeroState* imzero_init(const char *user_interaction_path);
 static void imzero_reset(ImZeroState *state);
 static void imzero_destroy(ImZeroState *state);
