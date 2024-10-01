@@ -18,7 +18,7 @@
 
 #include <stdbool.h>
 
-static FILE *fd;
+static FILE *fd = NULL;
 
 #if 0
 static void marshall_flush(void) {
@@ -188,12 +188,12 @@ static void marshall_event_keep_alive(void) {
 #endif
 static uint8_t translate_mouse_buttons(uint8_t button) {
     #if 1
-        static_assert(SDL_BUTTON_LEFT == 1);
-        static_assert(SDL_BUTTON_MIDDLE == 2);
-        static_assert(SDL_BUTTON_RIGHT == 3);
-        static_assert(SDL_BUTTON_X1 == 4);
-        static_assert(SDL_BUTTON_X2 == 5);
-        return 1<<button;
+        static_assert(SDL_BUTTON_LEFT == 1, "sdl constants do not match value of imzero constant");
+        static_assert(SDL_BUTTON_MIDDLE == 2, "sdl constants do not match value of imzero constant");
+        static_assert(SDL_BUTTON_RIGHT == 3, "sdl constants do not match value of imzero constant");
+        static_assert(SDL_BUTTON_X1 == 4, "sdl constants do not match value of imzero constant");
+        static_assert(SDL_BUTTON_X2 == 5, "sdl constants do not match value of imzero constant");
+        return 1<<(button-1);
     #else
         switch(button) {
         case SDL_BUTTON_LEFT:
@@ -497,11 +497,11 @@ static uint16_t translate_sdl_keymod_to_imzero(SDL_Keymod key_mod) {
     p |= ((key_mod & KMOD_SCROLL) ? 2048 : 0);
     return p;
 }
-static void emit_sdl_input_keyboard(SDL_KeyboardEvent *ev) {
+static void emit_sdl_input_keyboard(SDL_KeyboardEvent *ev, bool down) {
     marshall_event_keyboard(
         translate_sdl_keymod_to_imzero(ev->keysym.mod),
         translate_sdl_keysym_to_imzero(ev->keysym.sym),
-        ev->type == SDL_KEYDOWN,
+        down,
         (uint32_t)ev->keysym.sym,
         (uint32_t)ev->keysym.scancode
         );
@@ -568,9 +568,11 @@ inline void event_loop_handle_event_imzero(struct VideoState *cur_stream,SDL_Eve
     case SDL_MOUSEMOTION:
         emit_sdl_mouse_motion(&event->motion);
         break;
-    case SDL_KEYUP: // fallthrough
+    case SDL_KEYUP:
+        emit_sdl_input_keyboard(&event->key,false);
+        break;
     case SDL_KEYDOWN:
-        emit_sdl_input_keyboard(&event->key);
+        emit_sdl_input_keyboard(&event->key,true);
         break;
     case SDL_MOUSEBUTTONUP:
         emit_sdl_mouse_button(&event->button,false);
